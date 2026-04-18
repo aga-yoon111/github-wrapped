@@ -41,7 +41,6 @@ def tratar_erros(response):
         exit()
 
 
-# ✅ NOVO: tratamento de erro de rede
 def fazer_request(session, url):
     try:
         response = session.get(url, timeout=10)
@@ -132,7 +131,7 @@ def calcular_estatisticas(events):
         if tipo == "IssuesEvent" and payload.get("action") == "opened":
             issues_opened += 1
 
-        # TOP REPOS (frequência de eventos)
+        # TOP REPOS
         repo_nome = ev.get("repo", {}).get("name")
         if repo_nome:
             repos_counter[repo_nome] += 1
@@ -165,7 +164,6 @@ def calcular_linguagens(repos):
 def renderizar(username, dias, stats, linguagens):
     console.print(f"\n[bold green]GitHub Activity Report for: {username} (last {dias} days)[/]\n")
 
-    # ✅ estado vazio mais robusto (considera qualquer atividade)
     if not stats["top_repos"]:
         console.print(Panel(
             "✨ [bold white]Sem atividade nesse período![/]",
@@ -197,7 +195,7 @@ def renderizar(username, dias, stats, linguagens):
 
     console.print(tabela)
 
-    # Linguagens
+    #Linguagens
     console.print("\n[bold cyan]Languages:[/]")
     for lang, qtd in linguagens[:5]:
         console.print(f"• {lang}: {qtd}")
