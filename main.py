@@ -41,6 +41,17 @@ def tratar_erros(response):
         exit()
 
 
+# ✅ NOVO: tratamento de erro de rede
+def fazer_request(session, url):
+    try:
+        response = session.get(url, timeout=10)
+        tratar_erros(response)
+        return response
+    except requests.exceptions.RequestException:
+        console.print("[bold red]Erro de rede:[/] Falha ao conectar com a API do GitHub.")
+        exit()
+
+
 def buscar_eventos(session, username, dias):
     agora = datetime.now(timezone.utc)
     limite = agora - timedelta(days=dias)
@@ -50,9 +61,7 @@ def buscar_eventos(session, username, dias):
 
     while True:
         url = f"https://api.github.com/users/{username}/events?per_page=100&page={page}"
-        response = session.get(url)
-
-        tratar_erros(response)
+        response = fazer_request(session, url)
 
         eventos = response.json()
         if not eventos:
@@ -83,9 +92,7 @@ def buscar_repos(session, username):
 
     while True:
         url = f"https://api.github.com/users/{username}/repos?per_page=100&page={page}"
-        response = session.get(url)
-
-        tratar_erros(response)
+        response = fazer_request(session, url)
 
         dados = response.json()
         if not dados:
@@ -158,7 +165,8 @@ def calcular_linguagens(repos):
 def renderizar(username, dias, stats, linguagens):
     console.print(f"\n[bold green]GitHub Activity Report for: {username} (last {dias} days)[/]\n")
 
-    if stats["commits"] == 0 and stats["prs_opened"] == 0 and stats["issues"] == 0:
+    # ✅ estado vazio mais robusto (considera qualquer atividade)
+    if not stats["top_repos"]:
         console.print(Panel(
             "✨ [bold white]Sem atividade nesse período![/]",
             style="blue"
@@ -224,6 +232,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
 
