@@ -6,281 +6,224 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from datetime import datetime, timedelta, timezone
+from collections import Counter
 
 console = Console()
-#carregar token
-load_dotenv()
-GITHUB_TOKEN= os.environ.get("GITHUB_TOKEN")
 
-#verifica se tem github token
-if not GITHUB_TOKEN:
-    print("[bold red]Erro:[bold red] o GITHUB_TOKEN não foi encontrado!")
-    exit()
+def criar_sessao():
+    load_dotenv()
+    token = os.environ.get("GITHUB_TOKEN")
 
-#criação da sessao
-session = requests.Session()
-session.headers.update({
-    "Authorization": f"token {GITHUB_TOKEN}",
-    "Accept": "application/vnd.github.v3+json"
-})
+    if not token:
+        console.print("[bold red]Erro:[/] GITHUB_TOKEN não encontrado no .env")
+        exit()
 
-#faz a parte de username e days
-parser = argparse.ArgumentParser(description= "Gerador de  GitHub Wrapped")
-
-parser.add_argument("--username", required=True)
-parser.add_argument("--days", type=int, required=True)
-
-args = parser.parse_args()
-
-#verifica se número de dias é válido
-if args.days <=0:
-    print("[bold red]Erro:[bold red] número de dias inválido! Precisa ser um número inteiro positivo maior que 0.")
-    exit()
+    session = requests.Session()
+    session.headers.update({
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3+json"
+    })
+    return session
 
 
-
-#DATA ATUAL e LIMITE
-agora = datetime.now(timezone.utc)
-data_limite = agora - timedelta(days=args.days)
-
-
-
-#for das páginas
-
-page = 1
-
-events = []
-
-while True:
-    parar = False
-    link = f"https://api.github.com/users/{args.username}/events?page={page}"
-    response = session.get(link)
-
-    if response.status_code !=200:
-        print("Erro na requisição:", response.status_code)
-        print(response.text)
-        break
+def tratar_erros(response):
     if response.status_code == 404:
-        raise ValueError("User not found.")
-        break
+        console.print("[bold red]Erro:[/] Usuário não encontrado.")
+        exit()
+    elif response.status_code in [401, 403]:
+        console.print("[bold red]Erro:[/] Falha de autenticação ou limite da API excedido.")
+        exit()
+    elif response.status_code >= 500:
+        console.print("[bold red]Erro:[/] Problema no servidor do GitHub.")
+        exit()
+    elif response.status_code != 200:
+        console.print(f"[bold red]Erro inesperado:[/] {response.status_code}")
+        exit()
 
 
-    eventos = response.json()
+def buscar_eventos(session, username, dias):
+    agora = datetime.now(timezone.utc)
+    limite = agora - timedelta(days=dias)
 
-    if not eventos:
-        break
+    eventos_filtrados = []
+    page = 1
 
+    while True:
+        url = f"https://api.github.com/users/{username}/events?per_page=100&page={page}"
+        response = session.get(url)
 
-    for ev in eventos:
-        data = ev["created_at"]
-        data_do_evento = datetime.fromisoformat(data.replace("Z", "+00:00"))
-        if(data_do_evento<data_limite):
-            parar = True
+        tratar_erros(response)
+
+        eventos = response.json()
+        if not eventos:
             break
-        else:
-            events.append(ev)
-    if parar:
-        break
 
-    page+=1
+        parar = False
 
-#VERIFICACAO
-tem_dados = len(events) > 0
+        for ev in eventos:
+            data = datetime.fromisoformat(ev["created_at"].replace("Z", "+00:00"))
 
-if not tem_dados:
-    aviso = Panel(
-        "✨ [bold white]Parece que você tirou férias![/]\nNão encontramos atividades neste período.",
-        style="on blue",
-        expand=False
+            if data < limite:
+                parar = True
+                break
+
+            eventos_filtrados.append(ev)
+
+        if parar:
+            break
+
+        page += 1
+
+    return eventos_filtrados
+
+
+def buscar_repos(session, username):
+    repos = []
+    page = 1
+
+    while True:
+        url = f"https://api.github.com/users/{username}/repos?per_page=100&page={page}"
+        response = session.get(url)
+
+        tratar_erros(response)
+
+        dados = response.json()
+        if not dados:
+            break
+
+        repos.extend(dados)
+        page += 1
+
+    return repos
+
+
+def calcular_estatisticas(events):
+    total_commits = 0
+    prs_opened = 0
+    prs_merged = 0
+    issues_opened = 0
+
+    repos_counter = Counter()
+    dias_counter = Counter()
+
+    for ev in events:
+        tipo = ev["type"]
+        payload = ev.get("payload", {})
+
+        # commits
+        if tipo == "PushEvent":
+            total_commits += payload.get("size", 0)
+
+        # PRs
+        if tipo == "PullRequestEvent":
+            if payload.get("action") == "opened":
+                prs_opened += 1
+            if payload.get("action") == "closed" and payload.get("pull_request", {}).get("merged"):
+                prs_merged += 1
+
+        # issues
+        if tipo == "IssuesEvent" and payload.get("action") == "opened":
+            issues_opened += 1
+
+        # TOP REPOS (frequência de eventos)
+        repo_nome = ev.get("repo", {}).get("name")
+        if repo_nome:
+            repos_counter[repo_nome] += 1
+
+        # dias
+        dia = ev["created_at"][:10]
+        dias_counter[dia] += 1
+
+    return {
+        "commits": total_commits,
+        "prs_opened": prs_opened,
+        "prs_merged": prs_merged,
+        "issues": issues_opened,
+        "top_repos": repos_counter.most_common(5),
+        "busiest_day": dias_counter.most_common(1)[0] if dias_counter else None
+    }
+
+
+def calcular_linguagens(repos):
+    contador = Counter()
+
+    for repo in repos:
+        lang = repo.get("language")
+        if lang:
+            contador[lang] += 1
+
+    return contador.most_common()
+
+
+def renderizar(username, dias, stats, linguagens):
+    console.print(f"\n[bold green]GitHub Activity Report for: {username} (last {dias} days)[/]\n")
+
+    if stats["commits"] == 0 and stats["prs_opened"] == 0 and stats["issues"] == 0:
+        console.print(Panel(
+            "✨ [bold white]Sem atividade nesse período![/]",
+            style="blue"
+        ))
+        return
+
+    resumo = (
+        f"Total Commits: {stats['commits']}\n"
+        f"Pull Requests Opened: {stats['prs_opened']}\n"
+        f"Pull Requests Merged: {stats['prs_merged']}\n"
+        f"Issues Opened: {stats['issues']}\n\n"
     )
-    console.print(aviso)
-    exit()
 
-#CALCULANDO COISAS
-total_commits = 0
-total_prs_opened = 0
-total_prs_closed = 0
-total_issues_opened = 0
+    if stats["busiest_day"]:
+        dia, qtd = stats["busiest_day"]
+        resumo += f"[bold yellow]Busiest Day:[/]\n{dia}: {qtd} events"
 
-dicio_repos = {}
+    console.print(Panel(resumo, title="Summary"))
 
-for evento in events:
-    if evento['type']=='PushEvent':
-        payload = evento.get('payload', {})
-        
-        num_commits = payload.get('size', len(payload.get('commits', [0])))
+    # TOP 5
+    tabela = Table(title="Top 5 Repositories (by activity)")
+    tabela.add_column("Rank")
+    tabela.add_column("Repo")
+    tabela.add_column("Events")
 
-        total_commits+=num_commits
+    for i, (repo, qtd) in enumerate(stats["top_repos"], start=1):
+        tabela.add_row(str(i), repo, str(qtd))
 
-    
-    if evento['type']=='PullRequestEvent':
-        payload = evento.get('payload', {})
+    console.print(tabela)
 
-        acao =payload.get('action')
-
-        if acao == 'opened':
-            total_prs_opened+=1
-        if acao=='closed':
-            mergg = payload.get('merged')
-            if mergg:
-                total_prs_closed+=1
+    # Linguagens
+    console.print("\n[bold cyan]Languages:[/]")
+    for lang, qtd in linguagens[:5]:
+        console.print(f"• {lang}: {qtd}")
 
 
-    if evento['type'] == 'IssuesEvent':
-        payload = evento.get('payload', {})
-        acao =payload.get('action')
+def main():
+    parser = argparse.ArgumentParser(description="GitHub Wrapped")
+    parser.add_argument("--username", required=True)
+    parser.add_argument("--days", type=int, required=True)
 
-        if(acao == 'opened'):
-            total_issues_opened+=1
-            
-#printar pra ver se deu certo
-'''
-print(f"total commits: {total_commits}")
-print(f"total prs opened: {total_prs_opened}")
-print(f"total prs closed: {total_prs_closed}")
-print(f"total issues opened: {total_issues_opened}")
-'''
-#TOP 5 REPOSITORIOS
+    args = parser.parse_args()
 
-#fazer dicionário e ir adicionando {repositorio_nome : total commits}
-for evento in events:
-    repo = evento.get('repo', {})
-    nome_repo = repo.get('name')
-    if nome_repo not in dicio_repos:
-        dicio_repos[nome_repo] = 0
+    if args.days <= 0:
+        console.print("[bold red]Erro:[/] --days deve ser positivo")
+        exit()
 
-for evento in events:
-    payloadd = evento.get('payload', {})
-        
-    nume_commits = payloadd.get('size', len(payloadd.get('commits', [0])))
-    repos = evento.get('repo', {})
-    nome_repos = repos.get('name')
+    session = criar_sessao()
 
-    dicio_repos[nome_repos]+=nume_commits
+    events = buscar_eventos(session, args.username, args.days)
 
-#print(dicio_repos)
+    if not events:
+        console.print(Panel("Sem atividade nesse período.", style="blue"))
+        return
 
-#ordenando dicionário de forma decrescente
+    repos = buscar_repos(session, args.username)
 
-dicio_ordenado = dict(sorted(dicio_repos.items(), key=lambda item: item[1], reverse=True))
+    stats = calcular_estatisticas(events)
+    linguagens = calcular_linguagens(repos)
+
+    renderizar(args.username, args.days, stats, linguagens)
 
 
-#DIA MAIS MOVIMENTADO
-
-dicio_datas = {}
-#fazer dicionario e ir adicionando {data : total de eventos}
-for evento in events:
-    data_completa = evento["created_at"]
-    data_curta = data_completa[:10]
-    if data_curta not in dicio_datas:
-        dicio_datas[data_curta]=0
-    
-for evento in events:
-    data_comp = evento["created_at"]
-    data_curt = data_comp[:10]
-    dicio_datas[data_curt]+=1
-
-#print(dicio_datas)
-
-#achar dia mais movimentado
-
-dicio_orden = dict(sorted(dicio_datas.items(), key=lambda item: item[1], reverse=True))
-#print(dicio_orden)
-
-#USO DAS LINGUAGENS
-#dicionario de linguagens
-
-repos_usados = set()
-for evento in events:
-    repo = evento.get('repo', {})
-    nome = repo.get('name')
-    if nome:
-        repos_usados.add(nome)
-
-dicio_lan = {}
-dicio_lan["Python"] = 0
-dicio_lan["JavaScript"] = 0
-dicio_lan["C#"] = 0
-dicio_lan["TypeScript"] = 0
-dicio_lan["Java"] = 0
-dicio_lan["Outros"] = 0
-
-for nome_repo in repos_usados:
-    linkk = f"https://api.github.com/repos/{nome_repo}"
-    resposta = session.get(linkk)
-
-    if resposta.status_code !=200:
-        continue
-
-    dados = resposta.json()
-
-    linguagem = dados['language']
-    if linguagem == "Python":
-        dicio_lan["Python"]+=1
-    elif linguagem == "JavaScript":
-        dicio_lan["JavaScript"]+=1
-    elif linguagem == "C#":
-        dicio_lan["C#"]+=1
-    elif linguagem == "TypeScript":
-        dicio_lan["TypeScript"]+=1
-    elif linguagem == "Java":
-        dicio_lan["Java"]+=1
-    else:
-        dicio_lan["Outros"]+=1
-
-dicio_lan_ord = dict(sorted(dicio_lan.items(), key=lambda item: item[1], reverse=True))
-
-
-
-
-console.print(f"[bold green]GitHub Activity Report for: {args.username} (last {args.days} days)")
-
-chaves = list(dicio_orden)
-
-resumo = f"Total Commits: {total_commits}\nPull Requests Opened: {total_prs_opened}\nPull Requests Merged: {total_prs_closed}\nIssues Opened: {total_issues_opened}\n\n[bold yellow]--- Busiest Day ---[/]\n{chaves[0]}: {dicio_orden[chaves[0]]} events"
-meu_painel = Panel(resumo, title="[bold cyan]Summary Github Wrapped")
-console.print(meu_painel)
-
-#TOP 5
-
-chave = list(dicio_ordenado)
-tabela = Table(title = "[bold cyan]Top 5 Repositories (by commit count)")
-
-tabela.add_column("Rank", style = "dim", width=6)
-tabela.add_column("Repository", style = "cyan")
-tabela.add_column("Commits", justify="right")
-
-tabela.add_row(f"1. ", chave[0], str(dicio_ordenado[chave[0]]))
-tabela.add_row(f"2. ", chave[1], str(dicio_ordenado[chave[1]]))
-tabela.add_row(f"3. ", chave[2], str(dicio_ordenado[chave[2]]))
-tabela.add_row(f"4. ", chave[3], str(dicio_ordenado[chave[3]]))
-tabela.add_row(f"5. ", chave[4], str(dicio_ordenado[chave[4]]))
-
-console.print(tabela)
-
-#LANGUAGES
-chavec = list(dicio_lan_ord)
-console.print("\n[bold cyan]--- Use of Languages ---[/]")
-console.print(f"• [yellow]{chavec[0]}: {dicio_lan_ord[chavec[0]]}[/]")
-console.print(f"• [blue]{chavec[1]}: {dicio_lan_ord[chavec[1]]}[/]")
-console.print(f"• [orange]{chavec[2]}: {dicio_lan_ord[chavec[2]]}[/]")
-console.print(f"• [green]{chavec[3]}: {dicio_lan_ord[chavec[3]]}[/]")
-console.print(f"• [purple]{chavec[4]}: {dicio_lan_ord[chavec[4]]}[/]")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+if __name__ == "__main__":
+    main()
 
 
 
